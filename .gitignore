@@ -1,0 +1,13 @@
+# Build output
+bin/
+obj/
+publish/
+
+# Local machine-specific Claude Code permissions
+.claude/settings.local.json
+
+# Editor / OS cruft
+.vs/
+*.user
+Thumbs.db
+desktop.ini
