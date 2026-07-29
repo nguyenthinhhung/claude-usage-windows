@@ -1,3 +1,4 @@
+using System.Globalization;
 using System.Net;
 using System.Net.Http;
 using System.Text.Json;
@@ -15,6 +16,17 @@ public sealed record LimitWindow(string Label, double Percent, DateTimeOffset? R
 
     public TimeSpan? TimeToReset =>
         ResetsAt is { } r && r > DateTimeOffset.Now ? r - DateTimeOffset.Now : null;
+
+    /// <summary>
+    /// The window we measured has since rolled over, so this percentage describes a window
+    /// that no longer exists. Reporting it would be worse than reporting nothing — it reads
+    /// as a current figure while the live one has reset to near zero.
+    /// </summary>
+    public bool IsExpired => ResetsAt is { } r && r <= DateTimeOffset.Now;
+
+    /// <summary>Shared by the icon tooltip and the panel so the two can never disagree.</summary>
+    public string Display =>
+        IsExpired ? "—" : Percent.ToString("0.#", CultureInfo.InvariantCulture) + "%";
 }
 
 public sealed record UsageSnapshot(
@@ -30,14 +42,25 @@ public sealed record UsageSnapshot(
     public Severity Severity => Session.Severity > Weekly.Severity ? Session.Severity : Weekly.Severity;
 }
 
-public enum UsageError { None, NoCredentials, NotSubscription, AuthExpired, Network, BadResponse }
+public enum UsageError { None, NoCredentials, NotSubscription, AuthExpired, Network, RateLimited, BadResponse }
 
 public sealed record UsageResult(UsageSnapshot? Snapshot, UsageError Error, string? Detail)
 {
+    /// <summary>
+    /// How long the server asked us to wait, from a 429's Retry-After header. Null when the
+    /// response carried no header — the caller falls back to its own backoff.
+    /// </summary>
+    public TimeSpan? RetryAfter { get; init; }
+
+    /// <summary>Errors that clear on their own, so retrying on a timer is the right response.</summary>
+    public bool IsTransient => Error is UsageError.Network or UsageError.RateLimited or UsageError.BadResponse;
+
     public bool Ok => Error == UsageError.None && Snapshot is not null;
 
     public static UsageResult Success(UsageSnapshot s) => new(s, UsageError.None, null);
-    public static UsageResult Fail(UsageError e, string? detail = null) => new(null, e, detail);
+
+    public static UsageResult Fail(UsageError e, string? detail = null, TimeSpan? retryAfter = null) =>
+        new(null, e, detail) { RetryAfter = retryAfter };
 
     public string Message => Error switch
     {
@@ -45,6 +68,7 @@ public sealed record UsageResult(UsageSnapshot? Snapshot, UsageError Error, stri
         UsageError.NotSubscription => "No Claude subscription on this login",
         UsageError.AuthExpired    => "Login expired — run any claude command",
         UsageError.Network        => "Can't reach the usage API",
+        UsageError.RateLimited    => "Rate limited by the usage API",
         UsageError.BadResponse    => "Unexpected response from the usage API",
         _                         => "Unknown error",
     };
@@ -120,6 +144,8 @@ public sealed class UsageService
         {
             if (response.StatusCode is HttpStatusCode.Unauthorized or HttpStatusCode.Forbidden)
                 return UsageResult.Fail(UsageError.AuthExpired);
+            if (response.StatusCode is HttpStatusCode.TooManyRequests)
+                return UsageResult.Fail(UsageError.RateLimited, "HTTP 429", RetryAfterOf(response));
             if (!response.IsSuccessStatusCode)
                 return UsageResult.Fail(UsageError.BadResponse, $"HTTP {(int)response.StatusCode}");
         }
@@ -132,6 +158,19 @@ public sealed class UsageService
         {
             return UsageResult.Fail(UsageError.BadResponse, ex.Message);
         }
+    }
+
+    /// <summary>
+    /// Retry-After comes as either a delta in seconds or an HTTP-date; HttpClient parses both
+    /// into <see cref="RetryConditionHeaderValue"/>, so we just normalise to a duration.
+    /// </summary>
+    static TimeSpan? RetryAfterOf(HttpResponseMessage response)
+    {
+        var header = response.Headers.RetryAfter;
+        if (header is null) return null;
+        if (header.Delta is { } delta) return delta;
+        if (header.Date is { } date && date - DateTimeOffset.UtcNow is { Ticks: > 0 } wait) return wait;
+        return null;
     }
 
     static UsageSnapshot Parse(string json)

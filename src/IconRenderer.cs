@@ -68,6 +68,14 @@ public static class IconRenderer
 
     static void DrawRing(Graphics g, RectangleF rect, float stroke, LimitWindow limit)
     {
+        // A window that rolled over since the last poll gets the same blank track as "no data",
+        // because that is exactly what we have for the window now in effect.
+        if (limit.IsExpired)
+        {
+            DrawArc(g, rect, stroke, Theme.Dim(Theme.Unknown, 105), 100);
+            return;
+        }
+
         var color = Theme.For(limit.Severity);
         // The unfilled track has to stay visible on a dark taskbar, otherwise a low
         // percentage reads as a stray fragment instead of a gauge.

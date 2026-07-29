@@ -24,6 +24,7 @@ public sealed class UsagePopup : Form
 
     UsageResult? _result;
     bool _refreshing;
+    string? _notice;
     Screen? _screen;
 
     public Action? OnRefresh { get; set; }
@@ -89,10 +90,15 @@ public sealed class UsagePopup : Form
         return 0;
     }
 
-    public void ShowUsage(UsageResult? result, bool refreshing)
+    /// <param name="notice">
+    /// Optional status line for a condition the numbers themselves don't show — a rate limit
+    /// or network blip that left the displayed snapshot stale.
+    /// </param>
+    public void ShowUsage(UsageResult? result, bool refreshing, string? notice = null)
     {
         _result = result;
         _refreshing = refreshing;
+        _notice = notice;
         Relayout();
         if (Visible) Invalidate();
     }
@@ -200,6 +206,7 @@ public sealed class UsagePopup : Form
                 UsageError.AuthExpired => "Claude Code refreshes the token on its next run.",
                 UsageError.NoCredentials => "Sign in with the claude CLI, then refresh.",
                 UsageError.NotSubscription => "Limits are only reported for subscription logins.",
+                UsageError.RateLimited => "Too many requests — backing off before the next one.",
                 _ => err.Detail ?? "Will retry automatically.",
             };
             y = DrawWrapped(g, hint, _small, Theme.TextMuted, pad, y, right - pad);
@@ -209,6 +216,12 @@ public sealed class UsagePopup : Form
         {
             Draw(g, "Loading…", _label, Theme.TextMuted, pad, y);
             y += Px(20);
+        }
+
+        if (_notice is { Length: > 0 } notice)
+        {
+            y += Px(10);
+            y = DrawWrapped(g, notice, _small, Theme.Warning, pad, y, right - pad);
         }
 
         // ── Footer ────────────────────────────────────────────────────────────
@@ -228,10 +241,11 @@ public sealed class UsagePopup : Form
 
     int RenderLimit(Graphics? g, LimitWindow limit, int left, int right, int y)
     {
-        var color = Theme.For(limit.Severity);
+        var expired = limit.IsExpired;
+        var color = expired ? Theme.Unknown : Theme.For(limit.Severity);
 
         Draw(g, limit.Label, _label, Theme.TextPrimary, left, y + Px(2));
-        DrawRight(g, limit.Percent.ToString("0.#", Inv) + "%", _value, color, right, y);
+        DrawRight(g, limit.Display, _value, color, right, y);
         y += Px(22);
 
         // Track + fill, both fully rounded so a 1% sliver still renders as a visible pill.
@@ -240,7 +254,7 @@ public sealed class UsagePopup : Form
         if (g is not null)
         {
             FillPill(g, track, Theme.Track);
-            double pct = Math.Clamp(limit.Percent, 0, 100);
+            double pct = expired ? 0 : Math.Clamp(limit.Percent, 0, 100);
             if (pct > 0)
             {
                 int filled = Math.Max(barHeight, (int)Math.Round(track.Width * pct / 100.0));
@@ -373,6 +387,9 @@ public sealed class UsagePopup : Form
 
     static string ResetText(LimitWindow limit)
     {
+        if (limit.IsExpired)
+            return "window has reset · awaiting new figures";
+
         if (limit.ResetsAt is not { } resets)
             return "reset time unavailable";
 
